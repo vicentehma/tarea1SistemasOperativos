@@ -5,12 +5,18 @@
 #include <sstream>
 #include <unordered_map>
 #include <random>
+#include <unistd.h>
+#include <sys/wait.h>
 
 struct Actividad {
     std::string id;
     std::string nombre;
     int tiempo_ms;
     std::vector<std::string> dependencias;
+
+    int deps_pendientes = 0;
+    std::vector<int> dependientes;
+    bool lanzada = false;
 };
 
 std::string limpiar(const std::string& s) {
@@ -60,6 +66,7 @@ int main(int argc, char* argv[]) {
 
         actividades.push_back(act);
     }
+
     // el enunciado pide entre 100 y 5000 ms para las que no traen tiempo
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int> dist(100, 5000);
@@ -72,12 +79,67 @@ int main(int argc, char* argv[]) {
         indice[actividades[i].id] = i;
     }
 
-    std::cout << "Se leyeron " << actividades.size() << " actividades:\n";
-    for (const auto& a : actividades) {
-        std::cout << a.id << " " << a.nombre << " " << a.tiempo_ms << " | ";
-        for (const auto& dep : a.dependencias) std::cout << dep << " ";
-        std::cout << "\n";
+    // armo las relaciones: cuantas deps le faltan a cada una, y quienes dependen de ella
+    for (size_t i = 0; i < actividades.size(); i++) {
+        actividades[i].deps_pendientes = actividades[i].dependencias.size();
+        for (const auto& dep : actividades[i].dependencias) {
+            int pos = indice[dep];
+            actividades[pos].dependientes.push_back(i);
+        }
     }
 
+    int K = std::stoi(argv[2]);
+    int vivos = 0;
+    int terminadas = 0;
+
+    // las que arrancan sin deps ya estan listas
+    std::vector<int> listas;
+    for (size_t i = 0; i < actividades.size(); i++) {
+        if (actividades[i].deps_pendientes == 0) listas.push_back(i);
+    }
+
+    std::unordered_map<pid_t, int> pid_a_pos;
+
+    while (terminadas < (int)actividades.size()) {
+
+        // lanzo todas las que pueda sin pasarme de K
+        while (!listas.empty() && vivos < K) {
+            int pos = listas.back();
+            listas.pop_back();
+
+            if (actividades[pos].lanzada) continue;
+            actividades[pos].lanzada = true;
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                // hijo: simula y muere
+                std::cout << "[INICIO] " << actividades[pos].nombre << "\n";
+                usleep(actividades[pos].tiempo_ms * 1000);
+                std::cout << "[FIN]    " << actividades[pos].nombre << "\n";
+                _exit(0);
+            } else {
+                vivos++;
+                pid_a_pos[pid] = pos;
+            }
+        }
+
+        // espero que termine alguno para liberar un slot
+        if (vivos > 0) {
+            int estado;
+            pid_t fin = waitpid(-1, &estado, 0);
+            vivos--;
+            terminadas++;
+
+            int pos = pid_a_pos[fin];
+            for (int dep : actividades[pos].dependientes) {
+                actividades[dep].deps_pendientes--;
+                if (actividades[dep].deps_pendientes == 0) {
+                    listas.push_back(dep);
+                }
+            }
+        }
+    }
+
+    std::cout << "Todas las actividades completadas.\n";
     return 0;
 }
