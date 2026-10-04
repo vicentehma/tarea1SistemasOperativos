@@ -7,6 +7,7 @@
 #include <random>
 #include <algorithm>
 #include <csignal>
+#include <cstdlib>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -19,6 +20,7 @@ struct Actividad {
     int deps_pendientes = 0;
     std::vector<int> dependientes;
     bool lanzada = false;
+    bool abortada = false;
 
     int buzon_r = -1;
     int buzon_w = -1;
@@ -31,11 +33,10 @@ std::string limpiar(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
-
 volatile sig_atomic_t seremi_llego = 0;
 
 void manejador_sigint(int) {
-    seremi_llego = 1;   
+    seremi_llego = 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -44,12 +45,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    
     struct sigaction sa;
     sa.sa_handler = manejador_sigint;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, nullptr);
+
+    
+    const char* env_falla = std::getenv("FALLA_ID");
+    std::string falla_id = env_falla ? std::string(env_falla) : "";
 
     std::ifstream archivo(argv[1]);
     if (!archivo) {
@@ -118,13 +122,12 @@ int main(int argc, char* argv[]) {
 
     while (terminadas < (int)actividades.size()) {
 
-        
         if (seremi_llego) {
             std::cout << "\n[SEREMI] Llego la autoridad! Abortando todas las actividades...\n";
             for (auto& par : pid_a_pos) {
                 kill(par.first, SIGKILL);
             }
-            while (wait(nullptr) > 0) {}   
+            while (wait(nullptr) > 0) {}
             std::cout << "[SEREMI] Celebracion clausurada.\n";
             return 1;
         }
@@ -132,7 +135,7 @@ int main(int argc, char* argv[]) {
         while (!listas.empty() && vivos < K) {
             int pos = listas.back();
             listas.pop_back();
-            if (actividades[pos].lanzada) continue;
+            if (actividades[pos].lanzada || actividades[pos].abortada) continue;
             actividades[pos].lanzada = true;
 
             for (int dep : actividades[pos].dependientes) {
@@ -152,6 +155,14 @@ int main(int argc, char* argv[]) {
             if (pid == 0) {
                 std::cout << "[INICIO] " << actividades[pos].nombre << "\n";
                 usleep(actividades[pos].tiempo_ms * 1000);
+
+                
+                if (!falla_id.empty() && actividades[pos].id == falla_id) {
+                    std::cout << "[FALLO]  " << actividades[pos].nombre << " fallo internamente\n";
+                    std::cout.flush();
+                    _exit(1);
+                }
+
                 std::cout << "[FIN]    " << actividades[pos].nombre << "\n";
 
                 std::string msg = actividades[pos].nombre + " listo\n";
@@ -170,7 +181,6 @@ int main(int argc, char* argv[]) {
             int estado;
             pid_t fin = waitpid(-1, &estado, 0);
             if (fin == -1) {
-                
                 continue;
             }
             vivos--;
@@ -178,29 +188,54 @@ int main(int argc, char* argv[]) {
 
             int pos = pid_a_pos[fin];
             pid_a_pos.erase(fin);
-            for (int dep : actividades[pos].dependientes) {
-                actividades[dep].deps_pendientes--;
-                if (actividades[dep].deps_pendientes == 0) {
-                    if (actividades[dep].buzon_r != -1) {
-                        std::string acumulado;
-                        char buf[256];
-                        int esperados = actividades[dep].dependencias.size();
-                        int recibidos = 0;
-                        while (recibidos < esperados) {
-                            int n = read(actividades[dep].buzon_r, buf, sizeof(buf) - 1);
-                            if (n <= 0) break;
-                            buf[n] = '\0';
-                            acumulado += buf;
-                            recibidos = std::count(acumulado.begin(), acumulado.end(), '\n');
-                        }
-                        std::cout << "[PIPE] " << actividades[dep].nombre
-                                  << " recibio: " << acumulado;
-                        close(actividades[dep].buzon_r);
-                        close(actividades[dep].buzon_w);
-                        actividades[dep].buzon_r = -1;
-                        actividades[dep].buzon_w = -1;
+
+            bool fallo = !WIFEXITED(estado) || WEXITSTATUS(estado) != 0;
+
+            if (fallo) {
+               
+                std::cout << "[ABORTO] rama de " << actividades[pos].nombre << " cancelada\n";
+                std::vector<int> cola = actividades[pos].dependientes;
+                while (!cola.empty()) {
+                    int x = cola.back();
+                    cola.pop_back();
+                    if (actividades[x].abortada || actividades[x].lanzada) continue;
+                    actividades[x].abortada = true;
+                    terminadas++;
+                    std::cout << "   -> abortada: " << actividades[x].nombre << "\n";
+                    if (actividades[x].buzon_r != -1) {
+                        close(actividades[x].buzon_r);
+                        close(actividades[x].buzon_w);
+                        actividades[x].buzon_r = -1;
+                        actividades[x].buzon_w = -1;
                     }
-                    listas.push_back(dep);
+                    for (int y : actividades[x].dependientes) cola.push_back(y);
+                }
+            } else {
+                
+                for (int dep : actividades[pos].dependientes) {
+                    actividades[dep].deps_pendientes--;
+                    if (actividades[dep].deps_pendientes == 0 && !actividades[dep].abortada) {
+                        if (actividades[dep].buzon_r != -1) {
+                            std::string acumulado;
+                            char buf[256];
+                            int esperados = actividades[dep].dependencias.size();
+                            int recibidos = 0;
+                            while (recibidos < esperados) {
+                                int n = read(actividades[dep].buzon_r, buf, sizeof(buf) - 1);
+                                if (n <= 0) break;
+                                buf[n] = '\0';
+                                acumulado += buf;
+                                recibidos = std::count(acumulado.begin(), acumulado.end(), '\n');
+                            }
+                            std::cout << "[PIPE] " << actividades[dep].nombre
+                                      << " recibio: " << acumulado;
+                            close(actividades[dep].buzon_r);
+                            close(actividades[dep].buzon_w);
+                            actividades[dep].buzon_r = -1;
+                            actividades[dep].buzon_w = -1;
+                        }
+                        listas.push_back(dep);
+                    }
                 }
             }
         }
