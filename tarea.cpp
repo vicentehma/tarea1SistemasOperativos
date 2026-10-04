@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <random>
 #include <algorithm>
+#include <csignal>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -16,11 +17,11 @@ struct Actividad {
     std::vector<std::string> dependencias;
 
     int deps_pendientes = 0;
-    std::vector<int> dependientes;   // posiciones de los que dependen de mi
+    std::vector<int> dependientes;
     bool lanzada = false;
 
-    int buzon_r = -1;   // extremo de lectura de mi buzon de insumos
-    int buzon_w = -1;   // extremo de escritura
+    int buzon_r = -1;
+    int buzon_w = -1;
 };
 
 std::string limpiar(const std::string& s) {
@@ -30,11 +31,25 @@ std::string limpiar(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
+
+volatile sig_atomic_t seremi_llego = 0;
+
+void manejador_sigint(int) {
+    seremi_llego = 1;   
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 3) {
         std::cerr << "Uso: " << argv[0] << " plan.txt K\n";
         return 1;
     }
+
+    
+    struct sigaction sa;
+    sa.sa_handler = manejador_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
 
     std::ifstream archivo(argv[1]);
     if (!archivo) {
@@ -71,7 +86,6 @@ int main(int argc, char* argv[]) {
         actividades.push_back(act);
     }
 
-    // el enunciado pide entre 100 y 5000 ms para las que no traen tiempo
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int> dist(100, 5000);
     for (auto& a : actividades) {
@@ -83,7 +97,6 @@ int main(int argc, char* argv[]) {
         indice[actividades[i].id] = i;
     }
 
-    // armo las relaciones: cuantas deps le faltan a cada una, y quienes dependen de ella
     for (size_t i = 0; i < actividades.size(); i++) {
         actividades[i].deps_pendientes = actividades[i].dependencias.size();
         for (const auto& dep : actividades[i].dependencias) {
@@ -105,14 +118,23 @@ int main(int argc, char* argv[]) {
 
     while (terminadas < (int)actividades.size()) {
 
+        
+        if (seremi_llego) {
+            std::cout << "\n[SEREMI] Llego la autoridad! Abortando todas las actividades...\n";
+            for (auto& par : pid_a_pos) {
+                kill(par.first, SIGKILL);
+            }
+            while (wait(nullptr) > 0) {}   
+            std::cout << "[SEREMI] Celebracion clausurada.\n";
+            return 1;
+        }
+
         while (!listas.empty() && vivos < K) {
             int pos = listas.back();
             listas.pop_back();
             if (actividades[pos].lanzada) continue;
             actividades[pos].lanzada = true;
 
-            // antes de forkear creo el buzon de cada dependiente (si no existe todavia)
-            // asi el hijo hereda el extremo de escritura y puede avisarles al terminar
             for (int dep : actividades[pos].dependientes) {
                 if (actividades[dep].buzon_r == -1) {
                     int fd[2];
@@ -125,15 +147,13 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            std::cout.flush();   // vacio mi buffer antes de forkear, asi el hijo no lo hereda
+            std::cout.flush();
             pid_t pid = fork();
             if (pid == 0) {
-                // hijo: simula la actividad
                 std::cout << "[INICIO] " << actividades[pos].nombre << "\n";
                 usleep(actividades[pos].tiempo_ms * 1000);
                 std::cout << "[FIN]    " << actividades[pos].nombre << "\n";
 
-                // propago mi mensaje de insumo hacia cada dependiente (seccion 3.2)
                 std::string msg = actividades[pos].nombre + " listo\n";
                 for (int dep : actividades[pos].dependientes) {
                     write(actividades[dep].buzon_w, msg.c_str(), msg.size());
@@ -149,14 +169,18 @@ int main(int argc, char* argv[]) {
         if (vivos > 0) {
             int estado;
             pid_t fin = waitpid(-1, &estado, 0);
+            if (fin == -1) {
+                
+                continue;
+            }
             vivos--;
             terminadas++;
 
             int pos = pid_a_pos[fin];
+            pid_a_pos.erase(fin);
             for (int dep : actividades[pos].dependientes) {
                 actividades[dep].deps_pendientes--;
                 if (actividades[dep].deps_pendientes == 0) {
-                    // ya terminaron todas sus dependencias: leo los mensajes de su buzon
                     if (actividades[dep].buzon_r != -1) {
                         std::string acumulado;
                         char buf[256];
