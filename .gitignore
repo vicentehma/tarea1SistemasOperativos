@@ -1,2 +1,5 @@
 planificador
+generador
 *.o
+estres.txt
+salida_estres.txt
