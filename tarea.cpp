@@ -153,7 +153,9 @@ int main(int argc, char* argv[]) {
             std::cout.flush();
             pid_t pid = fork();
             if (pid == 0) {
-                std::cout << "[INICIO] " << actividades[pos].nombre << "\n";
+              std::cout << "[INICIO] id=" << actividades[pos].id << " "
+          << actividades[pos].nombre
+          << " (" << actividades[pos].tiempo_ms << "ms)\n";
                 usleep(actividades[pos].tiempo_ms * 1000);
 
                 
@@ -163,7 +165,8 @@ int main(int argc, char* argv[]) {
                     _exit(1);
                 }
 
-                std::cout << "[FIN]    " << actividades[pos].nombre << "\n";
+                std::cout << "[FIN]    id=" << actividades[pos].id << " "
+          << actividades[pos].nombre << "\n";
 
                 std::string msg = actividades[pos].nombre + " listo\n";
                 for (int dep : actividades[pos].dependientes) {
